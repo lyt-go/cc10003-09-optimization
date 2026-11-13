@@ -1,4 +1,4 @@
-"""分群分析接口：维护人群分群，覆盖提交规则校验、生效分群、失效分群等动作。"""
+"""分群分析接口：维护人群分群，覆盖状态流转动作与周期刷新编排。"""
 from __future__ import annotations
 
 from typing import Any
@@ -30,6 +30,36 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.post("/refresh-batch", response_model=ActionResult)
+def refresh_batch() -> ActionResult:
+    """周期任务入口：并发刷新所有已生效分群，共享标签版本只计算一次。"""
+    runs, stats, message = service.refresh_batch()
+    ok = not runs or all(run["状态"] == "已完成" for run in runs)
+    return ActionResult(ok=ok, message=message, detail={"任务列表": runs, "统计": stats})
+
+
+@router.get("/refresh-runs", response_model=PageResult[dict])
+def list_refresh_runs(page: int = 1, size: int = 20) -> PageResult[dict]:
+    """刷新任务列表：空列表说明还没有任何刷新记录，属于正常空态。"""
+    if size > 200:
+        raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
+    items, total = service.list_refresh_runs(page=page, size=size)
+    return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/refresh-stats")
+def refresh_stats() -> dict[str, Any]:
+    """刷新统计：命中、重算、续做、冲突数量与任务状态分布。"""
+    return service.refresh_stats()
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出分群分析清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "segment", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条人群分群明细；不存在时给出可读的错误说明。"""
@@ -50,16 +80,7 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条人群分群执行提交规则校验、生效分群、失效分群；不允许的动作会被拦下并说明原因。"""
+    """对单条人群分群执行状态流转或周期刷新；不允许的动作会被拦下并说明原因。"""
     action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
-    if entry is None:
-        return ActionResult(ok=False, message=message)
-    return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出分群分析清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "segment", "total": total, "items": items}
+    entry, message, detail, ok = service.run_action(entry_id, action)
+    return ActionResult(ok=ok, message=message, entry=entry, detail=detail)
